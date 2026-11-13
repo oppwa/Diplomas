@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Demo Firmas Digitales – Diplomas</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.3/tesseract.min.js"></script>
+<style>
+:root{--b:#1a3a6b;--g:#f4f6fa;--l:#d5dbe6}
+*{box-sizing:border-box}body{font-family:system-ui,Arial,sans-serif;margin:0;background:var(--g);color:#222}
+header{background:var(--b);color:#fff;padding:14px 20px}h1{font-size:18px;margin:0}
+main{max-width:1100px;margin:16px auto;padding:0 12px;display:grid;grid-template-columns:380px 1fr;gap:14px}
+@media(max-width:850px){main{grid-template-columns:1fr}}
+.card{background:#fff;border:1px solid var(--l);border-radius:10px;padding:14px;margin-bottom:12px}
+h2{font-size:14px;margin:0 0 10px;color:var(--b)}label{display:block;font-size:12px;margin:8px 0 3px}
+input,select{width:100%;padding:7px;border:1px solid var(--l);border-radius:6px}
+button{background:var(--b);color:#fff;border:0;border-radius:6px;padding:8px 12px;margin:4px 4px 0 0;cursor:pointer;font-size:13px}
+button.s{background:#fff;color:var(--b);border:1px solid var(--b)}button:disabled{opacity:.4;cursor:not-allowed}
+iframe{width:100%;height:80vh;border:1px solid var(--l);border-radius:8px;background:#fff}
+#log{font-size:12px;color:#555;margin-top:8px;white-space:pre-wrap}
+.ok{background:#e8f6ec;border:2px solid #2e9d57;border-radius:10px;padding:16px}.bad{background:#fdecec;border:2px solid #c33;border-radius:10px;padding:16px}
+#vista{max-width:520px;margin:30px auto;padding:0 12px}dt{font-size:12px;color:#666;margin-top:8px}dd{margin:0;font-weight:600}
+</style></head><body>
+<header><h1>Demo – Firma de diplomas con rúbricas, QR y verificación</h1></header>
+
+
+<main id="app">
+<section style="grid-column:1/-1">
+ <div class="card" style="display:flex;flex-wrap:wrap;gap:16px">
+  <div style="flex:1;min-width:260px"><h2>1. Rúbricas</h2><div id="rubs" style="max-height:260px;overflow:auto"></div></div>
+  <div style="flex:2;min-width:300px"><h2>2. Diplomas PDF (varios, 2 páginas c/u)</h2>
+   <input type="file" id="pdf" accept="application/pdf" multiple>
+   <h2 style="margin-top:14px">3. Acciones sobre todo el lote</h2>
+   <button id="bR" disabled>Rector (pág. 1)</button><button id="bD" disabled>Decano / Directora (pág. 1)</button><button id="bS" disabled>Secretaria (pág. 1 y 2)</button>
+   <button class="s" id="bOcr" disabled>Leer datos de todos</button>
+   <button id="bQ" disabled>Texto + QR a todos</button>
+   <button id="bInv" disabled>Invertir hojas (reverso primero)</button>
+   <button id="bDl" class="s" disabled>Descargar ZIP</button>
+   <div id="log"></div></div>
+  <div style="flex:1;min-width:300px"><h2>4. Firma digital (en orden, DNIe + ReFirma)</h2><div id="fd" style="font-size:12px"></div></div>
+ </div>
+ <div class="card" style="overflow:auto"><table id="tb" style="width:100%;border-collapse:collapse;font-size:12px"></table></div>
+</section>
+<section style="grid-column:1/-1"><iframe id="prev"></iframe></section>
+</main>
+
+<script>
+// ===== CONFIG =====
+// Coordenadas en puntos PDF (origen abajo-izquierda). Ajustar a la plantilla real.
+const POS = {
+  p1:{rector:{x:.2,y:.095,w:.12},decano:{x:.47,y:.095,w:.12},secretaria:{x:.76,y:.095,w:.12}}, // sobre las líneas de firma impresas
+  p2:{secretaria:{x:.2,y:.62,w:.12}},
+  firmaDigital:[{x:.04,y:.04},{x:.36,y:.04},{x:.68,y:.04}] // cajas ReFirma pág. 2 (w .28, h .10)
+};
+// ===================
+const UNIDADES=[ // verificar nombres exactos y cargos; re = patrón para detectar en el texto del diploma
+ {k:"salud",n:"Ciencias de la Salud",re:/SALUD/,cargo:"Decano"},
+ {k:"derecho",n:"Derecho y Ciencia Política",re:/DERECHO/,cargo:"Decano"},
+ {k:"economicas",n:"Ciencias Económicas, Administrativas y Contables",re:/ECON[ÓO]MIC/,cargo:"Decano"},
+ {k:"ingenieria",n:"Ingeniería y Arquitectura",re:/INGENIER/,cargo:"Decano"},
+ {k:"humanidades",n:"Ciencias y Humanidades",re:/HUMANIDADES/,cargo:"Decano"},
+ {k:"posgrado",n:"Escuela de Posgrado",re:/POS?T?GRADO/,cargo:"Directora"}];
+const ETAPAS=[{k:"rector",n:"Rector",prev:0},{k:"secretaria",n:"Secretaria General",prev:1},
+ ...UNIDADES.map(u=>({k:"dec_"+u.k,n:u.cargo+" – "+u.n,prev:2,unidad:u.k}))];
+const unidadDe=(txt,grado)=>{const T=(txt||"").toUpperCase();if(/MAESTR|DOCTOR/.test((grado||"").toUpperCase())||/POS?T?GRADO/.test(T))return"posgrado";
+ const m=T.match(/FACULTAD DE ([^.]+)\./);const u=m&&UNIDADES.find(u=>u.k!=="posgrado"&&u.re.test(m[1]));return u?u.k:"";};
+const $=id=>document.getElementById(id), {PDFDocument,rgb,StandardFonts}=PDFLib;
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const tipoDe=g=>{g=(g||"").toUpperCase();return g.includes("SEGUNDA ESPECIALIDAD")?"Segunda especialidad":g.includes("CERTIFICA")?"Certificación intermedia":g.includes("DOCTOR")?"Doctorado":(g.includes("MAESTR")||g.includes("MAGISTER"))?"Maestría":(g.includes("TÍTULO")||g.includes("TITULO"))?"Título profesional":g.includes("BACHILLER")?"Bachiller":"";};
+let items=[], rub=JSON.parse(localStorage.getItem("rubricas")||"{}");
+const log=t=>$("log").textContent=t;
+const esc=s=>String(s).replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+
+const DB={async save(r){const {file,...pub}=r,d=JSON.parse(localStorage.getItem("diplomas")||"{}");d[r.code]=pub;localStorage.setItem("diplomas",JSON.stringify(d));}}; // modo demo: datos en este navegador
+const rec=it=>({code:it.code,nombre:it.nombre.trim(),grado:it.grado,tipo:tipoDe(it.grado),ndip:it.ndip,resol:it.resol,fres:it.fres,emision:it.emision,fecha:it.fecha,unidad:it.unidad,firmas:it.firmas,file:it.file});
+
+const RUBS=[{k:"rector",n:"Rector"},{k:"secretaria",n:"Secretaria General"},...UNIDADES.map(u=>({k:"dec_"+u.k,n:u.cargo+" – "+u.n}))];
+$("rubs").innerHTML=RUBS.map(r=>`<label></label><input type="file" accept="image/*" data-r="${r.k}" data-n="${r.n}">`).join("");
+function rst(){document.querySelectorAll("[data-r]").forEach(i=>i.previousElementSibling.textContent=(rub[i.dataset.r]?"✔ ":"✘ ")+i.dataset.n);}
+document.querySelectorAll("[data-r]").forEach(i=>i.onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();
+ r.onload=()=>{rub[i.dataset.r]=r.result;try{localStorage.setItem("rubricas",JSON.stringify(rub));}catch{alert("No cabe en el navegador: usa imágenes más pequeñas.");}rst();};r.readAsDataURL(f);});
+rst();
+
+// Tabla del lote
+function render(){
+ $("tb").innerHTML="<tr style='text-align:left;background:#eef1f7'><th>#</th><th>Archivo</th><th>Págs</th><th>Nombre</th><th>Grado / título</th><th>N° diploma</th><th>Facultad / Escuela</th><th>Fecha emisión</th><th>Código</th><th>Firmas</th><th>Estado</th><th></th></tr>"+
+ items.map((it,i)=>`<tr style="border-top:1px solid #dde"><td>${i+1}</td><td>${esc(it.file)}</td><td>${it.pages}</td>
+ <td><input data-i="${i}" data-k="nombre" value="${esc(it.nombre)}"></td>
+ <td><input data-i="${i}" data-k="grado" value="${esc(it.grado)}"></td>
+ <td><input data-i="${i}" data-k="ndip" value="${esc(it.ndip)}"></td>
+ <td><select data-i="${i}" data-k="unidad"><option value="">—</option>${UNIDADES.map(u=>`<option value="${u.k}"${u.k===it.unidad?" selected":""}>${u.n}</option>`).join("")}</select></td>
+ <td><input type="date" data-i="${i}" data-k="fecha" value="${it.fecha}"></td>
+ <td>${it.code||""}</td><td>${it.firmas}/3</td><td>${esc(it.estado)}</td><td><button class="s" data-v="${i}">Ver</button></td></tr>`).join("");
+ $("tb").querySelectorAll("[data-k]").forEach(e=>e.onchange=()=>items[e.dataset.i][e.dataset.k]=e.value);
+ $("tb").querySelectorAll("[data-v]").forEach(e=>e.onclick=()=>preview(items[e.dataset.v]));
+ renderFD();
+}
+function preview(it){$("prev").src=URL.createObjectURL(new Blob([it.bytes],{type:"application/pdf"}));}
+
+$("pdf").onchange=async e=>{
+ for(const f of e.target.files){const bytes=new Uint8Array(await f.arrayBuffer());
+  try{const d=await PDFDocument.load(bytes);const n=d.getPageCount();
+   items.push({file:f.name,bytes,pages:n,nombre:"",grado:"",ndip:"",resol:"",fres:"",emision:"",fecha:"",unidad:"",firmas:0,code:"",estado:n!==2?"⚠ no tiene 2 páginas":"cargado"});}
+  catch{items.push({file:f.name,bytes:null,pages:"?",nombre:"",grado:"",ndip:"",resol:"",fres:"",emision:"",fecha:"",unidad:"",firmas:0,code:"",estado:"✘ PDF inválido"});}}
+ e.target.value="";["bR","bD","bS","bOcr","bQ","bInv"].forEach(b=>$(b).disabled=false);render();if(items[0]&&items[0].bytes)preview(items[0]);};
+
+const ok=it=>it.bytes&&it.pages===2;
+async function lote(fn,msg){for(let i=0;i<items.length;i++){const it=items[i];if(!ok(it)||it.firmas>0||it.inv)continue;log(msg+" "+(i+1)+"/"+items.length);
+  try{await fn(it);}catch(err){it.estado="✘ "+err.message;}render();}log("Listo.");}
+
+// Rúbricas
+async function stamp(it,who,pages){
+ const d=await PDFDocument.load(it.bytes);const img=rub[who].startsWith("data:image/png")?await d.embedPng(rub[who]):await d.embedJpg(rub[who]);
+ pages.forEach(p=>{const pg=d.getPage(p),{width:W,height:H}=pg.getSize(),c=POS["p"+(p+1)][who.startsWith("dec_")?"decano":who];if(!c)return;
+  const w=c.w*W,h=w*img.height/img.width;pg.drawImage(img,{x:c.x*W,y:c.y*H,width:w,height:h});});
+ it.bytes=await d.save();it.estado="rúbrica "+who;}
+function btn(id,who,pages){$(id).onclick=()=>{if(!rub[who])return alert("Falta la rúbrica de "+who);lote(it=>stamp(it,who,pages),"Rúbrica "+who);};}
+btn("bR","rector",[0]);
+$("bD").onclick=()=>lote(it=>{if(!it.unidad)throw new Error("sin facultad");const k="dec_"+it.unidad;if(!rub[k])throw new Error("falta rúbrica "+k);return stamp(it,k,[0]);},"Rúbrica decano/directora");
+btn("bS","secretaria",[0,1]);
+
+// OCR en lote
+async function ocr(it){
+ const pdf=await pdfjsLib.getDocument({data:it.bytes.slice()}).promise,pg=await pdf.getPage(1),vp=pg.getViewport({scale:2}),c=document.createElement("canvas");
+ c.width=vp.width;c.height=vp.height;await pg.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;
+ const {data:{text}}=await Tesseract.recognize(c,"spa");const T=text.toUpperCase();
+ const tp={"SEGUNDA ESPECIALIDAD":"Segunda especialidad","CERTIFICA":"Certificación intermedia","DOCTOR":"Doctorado","MAESTR":"Maestría","MAGISTER":"Maestría","TÍTULO":"Título profesional","TITULO":"Título profesional","BACHILLER":"Bachiller"};
+ 
+ const ln=text.split("\n").map(s=>s.trim()).filter(s=>/^[A-ZÁÉÍÓÚÑ ,.]{8,}$/.test(s)&&s.split(" ").length>=2&&!/UNIVERSIDAD|REPÚBLICA|DIPLOMA|BACHILLER|TÍTULO|RECTOR|DECANO|SECRETAR|FACULTAD|MAESTR|DOCTOR/.test(s));
+ if(ln[0])it.nombre=ln[0];const gr=text.split("\n").map(x=>x.trim()).find(x=>tipoDe(x)&&/^[A-ZÁÉÍÓÚÑ ]+$/.test(x));if(gr)it.grado=gr;
+ const m=text.match(/(\d{1,2})\s+de\s+([a-záéíóú]+)\s+(?:de|del)\s+(\d{4})/i),M=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+ if(m){let mi=M.indexOf(m[2].toLowerCase());if(m[2].toLowerCase()==="setiembre")mi=8;if(mi>=0)it.fecha=`${m[3]}-${String(mi+1).padStart(2,"0")}-${m[1].padStart(2,"0")}`;}
+ it.estado="OCR (revisar)";}
+async function lineas(pdf,n){const t=await (await pdf.getPage(n)).getTextContent(),rows=[];
+ t.items.filter(x=>x.str.trim()).sort((a,b)=>b.transform[5]-a.transform[5]||a.transform[4]-b.transform[4]).forEach(x=>{const r=rows.find(r=>Math.abs(r.y-x.transform[5])<3);r?r.s.push(x.str):rows.push({y:x.transform[5],s:[x.str]});});
+ return rows.map(r=>r.s.join(" ").replace(/\s+/g," ").trim());}
+const MES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+async function leer(it){
+ const pdf=await pdfjsLib.getDocument({data:it.bytes.slice()}).promise,L1=await lineas(pdf,1),L2=await lineas(pdf,2),t2=L2.join("\n");
+ if(L1.join("").length<80){await ocr(it);return;}
+ const nx=(L,re)=>{const i=L.findIndex(l=>re.test(l));return i>=0?L[i+1]||"":"";};
+ it.nombre=nx(L1,/conferir a/i)||nx(L2,/presente DIPLOMA/i);
+ it.grado=nx(L1,/^el (Grado|Título|Titulo|Diploma)/i)||L1.find(l=>/^[A-ZÁÉÍÓÚÑ ]+$/.test(l)&&/BACHILLER|MAESTR|DOCTOR|TÍTULO|ESPECIALIDAD/.test(l))||"";
+ const g=re=>(t2.match(re)||[])[1]||"";
+ it.ndip=g(/N[úu]mero de Diploma:\s*(\S+)/i);it.resol=g(/N[úu]mero de Resoluci[óo]n:\s*(\S+)/i);
+ it.fres=g(/Fecha de Resoluci[óo]n:\s*(.+)/i);it.emision=g(/Tipo de emisi[óo]n del Diploma:\s*(\S+)/i);
+ const m=L1.join(" ").match(/a los (\d{1,2}) d[íi]as del mes de ([a-záéíóú]+) del año (\d{4})/i);
+ if(m){const mi=MES.indexOf(m[2].toLowerCase());if(mi>=0)it.fecha=`${m[3]}-${String(mi+1).padStart(2,"0")}-${m[1].padStart(2,"0")}`;}
+ it.unidad=unidadDe(L1.join(" "),it.grado);it.estado=it.nombre&&it.grado&&it.ndip&&it.unidad?"datos leídos":"⚠ revisar datos/facultad";}
+$("bOcr").onclick=()=>lote(leer,"Leyendo datos");
+
+// Texto + QR
+function wrap(t,f,s,mw){const o=[];let l="";t.split(" ").forEach(w=>{const x=l?l+" "+w:w;if(f.widthOfTextAtSize(x,s)>mw){o.push(l);l=w;}else l=x;});if(l)o.push(l);return o;}
+const newCode=()=>Array.from(crypto.getRandomValues(new Uint8Array(7)),b=>"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[b%32]).join("");
+async function textoQR(it){
+ if(it.code)return;if(!it.nombre.trim()||!it.fecha||!it.grado.trim()||!it.unidad){it.estado="⚠ faltan nombre/grado/fecha/facultad";return;}
+ const code=newCode(),url=new URL("verificar.html#v="+code,location.href).href;
+ const d=await PDFDocument.load(it.bytes),pg=d.getPage(1),{width:W,height:H}=pg.getSize(),f=await d.embedFont(StandardFonts.Helvetica),fb=await d.embedFont(StandardFonts.HelveticaBold);
+ const txt="Esta es una copia auténtica imprimible de un documento electrónico archivado por la Universidad Andina del Cusco. Su autenticidad e integridad pueden ser contrastadas a través de la siguiente dirección web:";
+ const qs=72,qx=W*.93-qs,qy=H*.17,tx=W*.07,mw=qx-tx-14;let y=qy+qs-8;
+ wrap(txt,f,8,mw).forEach(l=>{pg.drawText(l,{x:tx,y,size:8,font:f});y-=11;});
+ wrap(url,f,8,mw).forEach(l=>{pg.drawText(l,{x:tx,y,size:8,font:f,color:rgb(0,0,.7)});y-=11;});
+ const lb="Código de verificación: ";pg.drawText(lb,{x:tx,y:y-2,size:8,font:f});pg.drawText(code,{x:tx+f.widthOfTextAtSize(lb,8),y:y-2,size:9,font:fb});
+ const qr=qrcode(0,"M");qr.addData(url);qr.make();const n=qr.getModuleCount(),c=qs/n;
+ for(let r=0;r<n;r++)for(let k=0;k<n;k++)if(qr.isDark(r,k))pg.drawRectangle({x:qx+k*c,y:qy+qs-(r+1)*c,width:c+.1,height:c+.1,color:rgb(0,0,0)});
+ ["Rector","Secretaria General",UNIDADES.find(u=>u.k===it.unidad).cargo].forEach((t,i)=>{const p=POS.firmaDigital[i];
+  pg.drawRectangle({x:p.x*W,y:p.y*H,width:.28*W,height:.10*H,borderColor:rgb(.6,.6,.6),borderWidth:.5});
+  pg.drawText("Firma digital ReFirma – "+t,{x:p.x*W+4,y:p.y*H+.10*H-10,size:6.5,font:f,color:rgb(.5,.5,.5)});});
+ it.bytes=await d.save();it.code=code;await DB.save(rec(it));
+ it.estado="✔ listo para firma digital";}
+$("bQ").onclick=async()=>{await lote(textoQR,"Texto+QR");$("bDl").disabled=!items.some(i=>i.code);};
+
+// ZIP
+$("bDl").onclick=async()=>{const z=new JSZip();items.filter(i=>i.code).forEach(i=>z.file(i.code+"_"+i.file,i.bytes));
+ const a=document.createElement("a");a.href=URL.createObjectURL(await z.generateAsync({type:"blob"}));a.download="diplomas_lote.zip";a.click();
+ const csv="codigo,archivo,nombre,grado,ndiploma,fecha\n"+items.filter(i=>i.code).map(i=>[i.code,i.file,i.nombre,i.grado,i.ndip,i.fecha].map(v=>'"'+v+'"').join(",")).join("\n");
+ const b=document.createElement("a");b.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));b.download="registro_lote.csv";b.click();};
+
+// Invertir hojas: el reverso (datos, QR y cajas de firma) pasa a ser la hoja 1, porque ReFirma firma en la primera hoja.
+// Se hace al final de la preparación, antes de la primera firma: después ya no se pueden poner rúbricas ni QR.
+$("bInv").onclick=()=>lote(async it=>{if(!it.code)throw new Error("primero agregue texto + QR");
+ const d=await PDFDocument.load(it.bytes),pg=d.getPage(1);d.removePage(1);d.insertPage(0,pg);it.bytes=await d.save();it.inv=true;it.estado="hojas invertidas";},"Invirtiendo hojas");
+// Firma digital en orden: Rector -> Secretaria -> Decano/Directora (cada firma se aplica sobre la anterior)
+const elegibles=et=>items.filter(i=>i.code&&i.firmas===et.prev&&(!et.unidad||i.unidad===et.unidad));
+const nsig=b=>(new TextDecoder("latin1").decode(b).match(/\/ByteRange/g)||[]).length;
+function renderFD(){$("fd").innerHTML=ETAPAS.map((et,n)=>{const e=elegibles(et).length;return `<div style="margin:6px 0;padding:6px;border:1px solid #dde;border-radius:6px"><b>${et.n}</b> · pendientes: ${e}<br>
+ <button class="s" data-p="${et.k}"${e?"":" disabled"}>⬇ Paquete a firmar</button> <input type="file" multiple accept=".pdf" data-u="${et.k}" style="width:auto;font-size:11px"></div>`;}).join("");
+ $("fd").querySelectorAll("[data-p]").forEach(b=>b.onclick=async()=>{const et=ETAPAS.find(x=>x.k===b.dataset.p),z=new JSZip();
+  if(et.prev===0&&elegibles(et).some(i=>!i.inv)&&!confirm("Hay diplomas con las hojas sin invertir (ReFirma firma en la 1.ª hoja). ¿Descargar igual?"))return;
+  elegibles(et).forEach(i=>z.file(i.code+"_"+i.file,i.bytes));const a=document.createElement("a");a.href=URL.createObjectURL(await z.generateAsync({type:"blob"}));a.download="firmar_"+et.k+".zip";a.click();});
+ $("fd").querySelectorAll("[data-u]").forEach(inp=>inp.onchange=async()=>{const et=ETAPAS.find(x=>x.k===inp.dataset.u);let okn=0,bad=[];
+  for(const f of inp.files){const b=new Uint8Array(await f.arrayBuffer()),it=items.find(i=>i.code&&f.name.toUpperCase().startsWith(i.code));
+   if(it&&elegibles(et).includes(it)&&nsig(b)===et.prev+1){it.bytes=b;it.firmas++;it.estado="firmado: "+et.n;await DB.save(rec(it));okn++;}else bad.push(f.name);}
+  log(okn+" PDF(s) firmados importados."+(bad.length?"\nRechazados (sin firma nueva, fuera de orden o de otra facultad):\n"+bad.join("\n"):""));render();});}
+renderFD();
+
+</script></body></html>
