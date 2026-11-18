@@ -18,8 +18,15 @@ dt{font-size:12px;color:#666;margin-top:8px}dd{margin:0;font-weight:600}h2{margi
 </main>
 <script>
 const UN={salud:["Decano","Ciencias de la Salud"],derecho:["Decano","Derecho y Ciencia Política"],economicas:["Decano","Ciencias Económicas, Administrativas y Contables"],ingenieria:["Decano","Ingeniería y Arquitectura"],humanidades:["Decano","Ciencias y Humanidades"],posgrado:["Directora","Escuela de Posgrado"]};
+// Registros fijos de ejemplo: los ve cualquier persona que escanee el QR o escriba el código (en cualquier navegador).
+const REGISTROS={
+ GQ69K4N:{code:"GQ69K4N",nombre:"JEAN POOL JOHAN MURIEL QUISPE",grado:"BACHILLER EN PSICOLOGÍA",tipo:"Bachiller",ndip:"UAC0390039137",resol:"CU-4138-2026-GT/SG-UAC",fres:"26 de octubre del 2026",emision:"Original",fecha:"2026-10-26",unidad:"salud",firmas:3}
+};
 const $=id=>document.getElementById(id),esc=s=>String(s??"").replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
-async function get(c){return (JSON.parse(localStorage.getItem("diplomas")||"{}"))[c]||null;} // modo demo: solo en el mismo navegador del panel
+async function get(c){
+ if(REGISTROS[c])return REGISTROS[c];
+ try{return (JSON.parse(localStorage.getItem("diplomas")||"{}"))[c]||null;}catch{return null;} // modo demo: solo en el mismo navegador del panel
+}
 async function verificar(c){c=(c||"").toUpperCase().trim();if(!c)return;$("cod").value=c;
  const r=await get(c).catch(()=>null);
  if(!r||!r.nombre){$("res").innerHTML=`<div class="card bad"><h2>✘ Código no encontrado</h2>No existe un diploma registrado con el código ${esc(c)}.</div>`;return;}
